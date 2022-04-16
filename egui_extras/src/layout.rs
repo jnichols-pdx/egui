@@ -122,6 +122,25 @@ impl<'l> StripLayout<'l> {
         self.add(width, height, add_contents)
     }
 
+    pub(crate) fn add_colored(
+        &mut self,
+        width: CellSize,
+        height: CellSize,
+        add_contents: impl FnOnce(&mut Ui),
+        bg_color: egui::Color32,
+    ) -> Response {
+        let rect = self.cell_rect(&width, &height);
+
+        // Make sure we don't have a gap in the stripe background:
+        let rect = rect.expand2(egui::vec2(0.5 * self.ui.spacing().item_spacing.x, 0.0));
+
+        self.ui
+            .painter()
+            .rect_filled(rect, 0.0, bg_color);
+
+        self.add(width, height, add_contents)
+    }
+
     /// only needed for layouts with multiple lines, like [`Table`](crate::Table).
     pub fn end_line(&mut self) {
         match self.direction {

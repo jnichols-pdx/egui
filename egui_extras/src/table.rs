@@ -173,6 +173,7 @@ impl<'a> TableBuilder<'a> {
                 widths: &widths,
                 width_index: 0,
                 striped: false,
+                bg_color: None,
                 height,
             });
             layout.allocate_rect();
@@ -419,6 +420,7 @@ impl<'a> TableBody<'a> {
             widths: &self.widths,
             width_index: 0,
             striped: self.striped && self.row_nr % 2 == 0,
+            bg_color: None,
             height,
         });
 
@@ -480,6 +482,7 @@ impl<'a> TableBody<'a> {
                     widths: &self.widths,
                     width_index: 0,
                     striped: self.striped && idx % 2 == 0,
+                    bg_color: None,
                     height: row_height_sans_spacing,
                 },
             );
@@ -543,6 +546,7 @@ impl<'a> TableBody<'a> {
                     widths: &self.widths,
                     width_index: 0,
                     striped: self.striped && row_index % 2 == 0,
+                    bg_color: None,
                     height: row_height,
                 };
                 populate_row(row_index, tr);
@@ -557,6 +561,7 @@ impl<'a> TableBody<'a> {
                 widths: &self.widths,
                 width_index: 0,
                 striped: self.striped && row_index % 2 == 0,
+                bg_color: None,
                 height: row_height,
             };
             populate_row(row_index, tr);
@@ -599,6 +604,7 @@ pub struct TableRow<'a, 'b> {
     widths: &'b [f32],
     width_index: usize,
     striped: bool,
+    bg_color: Option<egui::Color32>,
     height: f32,
 }
 
@@ -618,12 +624,19 @@ impl<'a, 'b> TableRow<'a, 'b> {
 
         let width = CellSize::Absolute(width);
         let height = CellSize::Absolute(self.height);
-
-        if self.striped {
-            self.layout.add_striped(width, height, add_contents)
+        if self.bg_color.is_none() {
+            if self.striped {
+                self.layout.add_striped(width, height, add_contents)
+            } else {
+                self.layout.add(width, height, add_contents)
+            }
         } else {
-            self.layout.add(width, height, add_contents)
+            self.layout.add_colored(width, height, add_contents, self.bg_color.unwrap())
         }
+    }
+
+    pub fn set_bg_color(&mut self, bg_color: egui::Color32) {
+        self.bg_color = Some(bg_color);
     }
 }
 
