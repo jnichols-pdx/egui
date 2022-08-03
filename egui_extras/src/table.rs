@@ -631,7 +631,8 @@ impl<'a, 'b> TableRow<'a, 'b> {
                 self.layout.add(width, height, add_contents)
             }
         } else {
-            self.layout.add_colored(width, height, add_contents, self.bg_color.unwrap())
+            self.layout
+                .add_colored(width, height, add_contents, self.bg_color.unwrap())
         }
     }
 
