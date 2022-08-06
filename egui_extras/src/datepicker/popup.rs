@@ -269,7 +269,7 @@ impl<'a> DatePickerPopup<'a> {
                                     });
                                 }
                             })
-                            .body(|mut body| {
+                            .body(None, |mut body| {
                                 for week in weeks {
                                     body.row(height, |mut row| {
                                         if self.calendar_week {

@@ -112,7 +112,7 @@ impl TableDemo {
                     ui.heading("Content");
                 });
             })
-            .body(|mut body| match self.demo {
+            .body(None, |mut body| match self.demo {
                 DemoType::Manual => {
                     for row_index in 0..20 {
                         let is_thick = thick_row(row_index);

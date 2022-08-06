@@ -37,7 +37,7 @@ use egui::{Rect, Response, Ui, Vec2};
 ///             ui.heading("Fixed");
 ///         });
 ///     })
-///     .body(|mut body| {
+///     .body(None, |mut body| {
 ///         body.row(30.0, |mut row| {
 ///             row.col(|ui| {
 ///                 ui.label("first row growing cell");
