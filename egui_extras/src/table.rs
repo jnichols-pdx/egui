@@ -232,7 +232,7 @@ impl<'a> TableBuilder<'a> {
             stick_to_bottom,
             cell_layout,
         }
-        .body(body);
+        .body(None, body);
     }
 }
 
@@ -274,7 +274,7 @@ pub struct Table<'a> {
 
 impl<'a> Table<'a> {
     /// Create table body after adding a header row
-    pub fn body<F>(self, body: F)
+    pub fn body<F>(self, scroll_offset: Option<f32>, body: F)
     where
         F: for<'b> FnOnce(TableBody<'b>),
     {
@@ -299,19 +299,33 @@ impl<'a> Table<'a> {
         let scroll_area = egui::ScrollArea::new([false, scroll])
             .auto_shrink([true; 2])
             .stick_to_bottom(stick_to_bottom);
-
-        scroll_area.show(ui, move |ui| {
-            let layout = StripLayout::new(ui, CellDirection::Horizontal, clip, cell_layout);
-
-            body(TableBody {
-                layout,
-                widths,
-                striped,
-                row_nr: 0,
-                start_y: avail_rect.top(),
-                end_y: avail_rect.bottom(),
+        if let Some(offset) = scroll_offset {
+            scroll_area
+                .vertical_scroll_offset(offset)
+                .show(ui, move |ui| {
+                    let layout = StripLayout::new(ui, CellDirection::Horizontal, clip, cell_layout);
+                    body(TableBody {
+                        layout,
+                        widths,
+                        striped,
+                        row_nr: 0,
+                        start_y: avail_rect.top(),
+                        end_y: avail_rect.bottom(),
+                    });
+                });
+        } else {
+            scroll_area.show(ui, move |ui| {
+                let layout = StripLayout::new(ui, CellDirection::Horizontal, clip, cell_layout);
+                body(TableBody {
+                    layout,
+                    widths,
+                    striped,
+                    row_nr: 0,
+                    start_y: avail_rect.top(),
+                    end_y: avail_rect.bottom(),
+                });
             });
-        });
+        }
 
         let bottom = ui.min_rect().bottom();
 
