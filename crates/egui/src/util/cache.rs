@@ -5,6 +5,8 @@
 //! If it is still used next frame, it is not recomputed.
 //! If it is not used next frame, it is evicted from the cache to save memory.
 
+use ahash::AHashMap;
+
 /// Something that does an expensive computation that we want to cache
 /// to save us from recomputing it each frame.
 pub trait ComputerMut<Key, Value>: 'static + Send + Sync {
@@ -119,7 +121,7 @@ impl<Value: 'static + Send + Sync, Computer: 'static + Send + Sync> CacheTrait
 /// ```
 #[derive(Default)]
 pub struct CacheStorage {
-    caches: ahash::HashMap<std::any::TypeId, Box<dyn CacheTrait>>,
+    caches: AHashMap<std::any::TypeId, Box<dyn CacheTrait>>,
 }
 
 impl CacheStorage {

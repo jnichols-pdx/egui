@@ -6,6 +6,8 @@ use std::{
     rc::Rc,
 };
 
+use epaint::ahash::AHashSet;
+
 use crate::*;
 use epaint::color::Hsva;
 use epaint::util::FloatOrd;
@@ -100,7 +102,7 @@ struct PlotMemory {
     /// or if the bounds should be calculated based by included point or auto bounds.
     bounds_modified: AxisBools,
     hovered_entry: Option<String>,
-    hidden_items: ahash::HashSet<String>,
+    hidden_items: AHashSet<String>,
     last_screen_transform: ScreenTransform,
     /// Allows to remember the first click position when performing a boxed zoom
     last_click_pos_for_zoom: Option<Pos2>,

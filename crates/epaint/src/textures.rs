@@ -1,4 +1,5 @@
 use crate::{ImageData, ImageDelta, TextureId};
+use ahash::AHashMap;
 
 // ----------------------------------------------------------------------------
 
@@ -10,7 +11,7 @@ pub struct TextureManager {
     /// We allocate texture id:s linearly.
     next_id: u64,
     /// Information about currently allocated textures.
-    metas: ahash::HashMap<TextureId, TextureMeta>,
+    metas: AHashMap<TextureId, TextureMeta>,
     delta: TexturesDelta,
 }
 

@@ -2,6 +2,7 @@ use crate::{
     mutex::{Mutex, RwLock},
     TextureAtlas,
 };
+use ahash::AHashMap;
 use emath::{vec2, Vec2};
 use std::collections::BTreeSet;
 use std::sync::Arc;
@@ -65,7 +66,7 @@ pub struct FontImpl {
     // move each character by this much (hack)
     y_offset: f32,
     pixels_per_point: f32,
-    glyph_info_cache: RwLock<ahash::HashMap<char, GlyphInfo>>, // TODO(emilk): standard Mutex
+    glyph_info_cache: RwLock<AHashMap<char, GlyphInfo>>, // TODO(emilk): standard Mutex
     atlas: Arc<Mutex<TextureAtlas>>,
 }
 
@@ -220,7 +221,7 @@ pub struct Font {
     replacement_glyph: (FontIndex, GlyphInfo),
     pixels_per_point: f32,
     row_height: f32,
-    glyph_info_cache: ahash::HashMap<char, (FontIndex, GlyphInfo)>,
+    glyph_info_cache: AHashMap<char, (FontIndex, GlyphInfo)>,
 }
 
 impl Font {
