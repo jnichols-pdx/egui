@@ -10,7 +10,7 @@ fn main() {
     let (gl_window, gl) = create_display(&event_loop);
     let gl = std::sync::Arc::new(gl);
 
-    let mut egui_glow = egui_glow::EguiGlow::new(&event_loop, gl.clone());
+    let mut egui_glow = egui_glow::EguiGlow::new(&event_loop, gl.clone(), None);
 
     event_loop.run(move |event, _, control_flow| {
         let mut redraw = || {
@@ -116,7 +116,7 @@ fn create_display(
     let gl_window = unsafe {
         glutin::ContextBuilder::new()
             .with_depth_buffer(0)
-            .with_srgb(true)
+            .with_srgb(false)
             .with_stencil_buffer(0)
             .with_vsync(true)
             .build_windowed(window_builder, event_loop)

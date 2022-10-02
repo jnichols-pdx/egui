@@ -75,7 +75,7 @@ impl Frame {
 
     pub fn menu(style: &Style) -> Self {
         Self {
-            inner_margin: Margin::same(1.0),
+            inner_margin: style.spacing.menu_margin,
             rounding: style.visuals.widgets.noninteractive.rounding,
             shadow: style.visuals.popup_shadow,
             fill: style.visuals.window_fill(),
@@ -244,6 +244,13 @@ impl Prepared {
         rect
     }
 
+    fn content_with_margin(&self) -> Rect {
+        let mut rect = self.content_ui.min_rect();
+        rect.min -= self.frame.inner_margin.left_top() + self.frame.outer_margin.left_top();
+        rect.max += self.frame.inner_margin.right_bottom() + self.frame.outer_margin.right_bottom();
+        rect
+    }
+
     pub fn end(self, ui: &mut Ui) -> Response {
         let paint_rect = self.paint_rect();
 
@@ -258,6 +265,6 @@ impl Prepared {
             ui.painter().set(where_to_put_background, shape);
         }
 
-        ui.allocate_rect(paint_rect, Sense::hover())
+        ui.allocate_rect(self.content_with_margin(), Sense::hover())
     }
 }

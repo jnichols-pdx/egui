@@ -586,11 +586,12 @@ impl Ui {
         self.id.with(&id_source)
     }
 
-    pub(crate) fn next_auto_id(&self) -> Id {
+    /// This is the `Id` that will be assigned to the next widget added to this `Ui`.
+    pub fn next_auto_id(&self) -> Id {
         Id::new(self.next_auto_id_source)
     }
 
-    pub(crate) fn auto_id_with<IdSource>(&self, id_source: IdSource) -> Id
+    pub fn auto_id_with<IdSource>(&self, id_source: IdSource) -> Id
     where
         IdSource: Hash + std::fmt::Debug,
     {
@@ -2025,7 +2026,7 @@ impl Ui {
         self.placer.set_row_height(height);
     }
 
-    /// Temporarily split split an Ui into several columns.
+    /// Temporarily split a [`Ui`] into several columns.
     ///
     /// ```
     /// # egui::__run_test_ui(|ui| {

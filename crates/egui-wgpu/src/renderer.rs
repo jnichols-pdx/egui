@@ -2,7 +2,7 @@
 
 use std::{borrow::Cow, collections::HashMap, num::NonZeroU32};
 
-use egui::{epaint::Primitive, NumExt, PaintCallbackInfo};
+use egui::{epaint::Primitive, PaintCallbackInfo};
 use type_map::concurrent::TypeMap;
 use wgpu;
 use wgpu::util::DeviceExt as _;
@@ -19,7 +19,7 @@ use wgpu::util::DeviceExt as _;
 /// can issue draw commands.
 ///
 /// The final argument of both the `prepare` and `paint` callbacks is a the
-/// [`paint_callback_resources`][crate::renderer::RenderPass::paint_callback_resources].
+/// [`paint_callback_resources`][crate::renderer::Renderer::paint_callback_resources].
 /// `paint_callback_resources` has the same lifetime as the Egui render pass, so it can be used to
 /// store buffers, pipelines, and other information that needs to be accessed during the render
 /// pass.
@@ -118,9 +118,10 @@ struct SizedBuffer {
     size: usize,
 }
 
-/// Render pass to render a egui based GUI.
-pub struct RenderPass {
-    render_pipeline: wgpu::RenderPipeline,
+/// Renderer for a egui based GUI.
+pub struct Renderer {
+    pipeline: wgpu::RenderPipeline,
+    depth_texture: Option<(wgpu::Texture, wgpu::TextureView)>,
     index_buffers: Vec<SizedBuffer>,
     vertex_buffers: Vec<SizedBuffer>,
     uniform_buffer: SizedBuffer,
@@ -136,14 +137,16 @@ pub struct RenderPass {
     pub paint_callback_resources: TypeMap,
 }
 
-impl RenderPass {
-    /// Creates a new render pass to render a egui UI.
+impl Renderer {
+    /// Creates a renderer for a egui UI.
     ///
-    /// If the format passed is not a *Srgb format, the shader will automatically convert to `sRGB` colors in the shader.
+    /// `output_format` should preferably be [`wgpu::TextureFormat::Rgba8Unorm`] or
+    /// [`wgpu::TextureFormat::Bgra8Unorm`], i.e. in gamma-space.
     pub fn new(
         device: &wgpu::Device,
         output_format: wgpu::TextureFormat,
         msaa_samples: u32,
+        depth_bits: u8,
     ) -> Self {
         let shader = wgpu::ShaderModuleDescriptor {
             label: Some("egui_shader"),
@@ -221,15 +224,19 @@ impl RenderPass {
             push_constant_ranges: &[],
         });
 
-        let render_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        let depth_stencil = (depth_bits > 0).then(|| wgpu::DepthStencilState {
+            format: wgpu::TextureFormat::Depth32Float,
+            depth_write_enabled: false,
+            depth_compare: wgpu::CompareFunction::Always,
+            stencil: wgpu::StencilState::default(),
+            bias: wgpu::DepthBiasState::default(),
+        });
+
+        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("egui_pipeline"),
             layout: Some(&pipeline_layout),
             vertex: wgpu::VertexState {
-                entry_point: if output_format.describe().srgb {
-                    "vs_main"
-                } else {
-                    "vs_conv_main"
-                },
+                entry_point: "vs_main",
                 module: &module,
                 buffers: &[wgpu::VertexBufferLayout {
                     array_stride: 5 * 4,
@@ -249,7 +256,7 @@ impl RenderPass {
                 polygon_mode: wgpu::PolygonMode::default(),
                 strip_index_format: None,
             },
-            depth_stencil: None,
+            depth_stencil,
             multisample: wgpu::MultisampleState {
                 alpha_to_coverage_enabled: false,
                 count: msaa_samples,
@@ -258,7 +265,12 @@ impl RenderPass {
 
             fragment: Some(wgpu::FragmentState {
                 module: &module,
-                entry_point: "fs_main",
+                entry_point: if output_format.describe().srgb {
+                    tracing::warn!("Detected a linear (sRGBA aware) framebuffer {:?}. egui prefers Rgba8Unorm or Bgra8Unorm", output_format);
+                    "fs_main_linear_framebuffer"
+                } else {
+                    "fs_main_gamma_framebuffer" // this is what we prefer
+                },
                 targets: &[Some(wgpu::ColorTargetState {
                     format: output_format,
                     blend: Some(wgpu::BlendState {
@@ -280,7 +292,7 @@ impl RenderPass {
         });
 
         Self {
-            render_pipeline,
+            pipeline,
             vertex_buffers: Vec::with_capacity(64),
             index_buffers: Vec::with_capacity(64),
             uniform_buffer,
@@ -289,11 +301,32 @@ impl RenderPass {
             textures: HashMap::new(),
             next_user_texture_id: 0,
             paint_callback_resources: TypeMap::default(),
+            depth_texture: None,
         }
     }
 
-    /// Executes the egui render pass.
-    pub fn execute(
+    pub fn update_depth_texture(&mut self, device: &wgpu::Device, width: u32, height: u32) {
+        let texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: None,
+            size: wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Depth32Float,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+        });
+
+        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+
+        self.depth_texture = Some((texture, view));
+    }
+
+    /// Executes the renderer on its own render pass.
+    pub fn render(
         &self,
         encoder: &mut wgpu::CommandEncoder,
         color_attachment: &wgpu::TextureView,
@@ -307,7 +340,18 @@ impl RenderPass {
             wgpu::LoadOp::Load
         };
 
-        let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+        let depth_stencil_attachment = self.depth_texture.as_ref().map(|(_texture, view)| {
+            wgpu::RenderPassDepthStencilAttachment {
+                view,
+                depth_ops: Some(wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(1.0),
+                    store: true,
+                }),
+                stencil_ops: None,
+            }
+        });
+
+        let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                 view: color_attachment,
                 resolve_target: None,
@@ -316,27 +360,24 @@ impl RenderPass {
                     store: true,
                 },
             })],
-            depth_stencil_attachment: None,
-            label: Some("egui main render pass"),
+            depth_stencil_attachment,
+            label: Some("egui_render_pass"),
         });
-        rpass.push_debug_group("egui_pass");
 
-        self.execute_with_renderpass(&mut rpass, paint_jobs, screen_descriptor);
-
-        rpass.pop_debug_group();
+        self.render_onto_renderpass(&mut render_pass, paint_jobs, screen_descriptor);
     }
 
-    /// Executes the egui render pass onto an existing wgpu renderpass.
-    pub fn execute_with_renderpass<'rpass>(
-        &'rpass self,
-        rpass: &mut wgpu::RenderPass<'rpass>,
+    /// Executes the egui renderer onto an existing wgpu renderpass.
+    pub fn render_onto_renderpass<'rp>(
+        &'rp self,
+        render_pass: &mut wgpu::RenderPass<'rp>,
         paint_jobs: &[egui::epaint::ClippedPrimitive],
         screen_descriptor: &ScreenDescriptor,
     ) {
         let pixels_per_point = screen_descriptor.pixels_per_point;
         let size_in_pixels = screen_descriptor.size_in_pixels;
 
-        // Whether or not we need to reset the renderpass state because a paint callback has just
+        // Whether or not we need to reset the render pass because a paint callback has just
         // run.
         let mut needs_reset = true;
 
@@ -349,7 +390,7 @@ impl RenderPass {
         } in paint_jobs
         {
             if needs_reset {
-                rpass.set_viewport(
+                render_pass.set_viewport(
                     0.0,
                     0.0,
                     size_in_pixels[0] as f32,
@@ -357,8 +398,8 @@ impl RenderPass {
                     0.0,
                     1.0,
                 );
-                rpass.set_pipeline(&self.render_pipeline);
-                rpass.set_bind_group(0, &self.uniform_bind_group, &[]);
+                render_pass.set_pipeline(&self.pipeline);
+                render_pass.set_bind_group(0, &self.uniform_bind_group, &[]);
                 needs_reset = false;
             }
 
@@ -366,16 +407,16 @@ impl RenderPass {
                 let rect = ScissorRect::new(clip_rect, pixels_per_point, size_in_pixels);
 
                 if rect.width == 0 || rect.height == 0 {
-                    // Skip rendering with zero-sized clip areas.
+                    // Skip rendering zero-sized clip areas.
                     if let Primitive::Mesh(_) = primitive {
-                        // If this is a mesh, we need to advance the index and vertex buffer iterators
+                        // If this is a mesh, we need to advance the index and vertex buffer iterators:
                         index_buffers.next().unwrap();
                         vertex_buffers.next().unwrap();
                     }
                     continue;
                 }
 
-                rpass.set_scissor_rect(rect.x, rect.y, rect.width, rect.height);
+                render_pass.set_scissor_rect(rect.x, rect.y, rect.width, rect.height);
             }
 
             match primitive {
@@ -384,13 +425,13 @@ impl RenderPass {
                     let vertex_buffer = vertex_buffers.next().unwrap();
 
                     if let Some((_texture, bind_group)) = self.textures.get(&mesh.texture_id) {
-                        rpass.set_bind_group(1, bind_group, &[]);
-                        rpass.set_index_buffer(
+                        render_pass.set_bind_group(1, bind_group, &[]);
+                        render_pass.set_index_buffer(
                             index_buffer.buffer.slice(..),
                             wgpu::IndexFormat::Uint32,
                         );
-                        rpass.set_vertex_buffer(0, vertex_buffer.buffer.slice(..));
-                        rpass.draw_indexed(0..mesh.indices.len() as u32, 0, 0..1);
+                        render_pass.set_vertex_buffer(0, vertex_buffer.buffer.slice(..));
+                        render_pass.draw_indexed(0..mesh.indices.len() as u32, 0, 0..1);
                     } else {
                         tracing::warn!("Missing texture: {:?}", mesh.texture_id);
                     }
@@ -419,7 +460,7 @@ impl RenderPass {
                             let rect_max_x = rect_max_x.round();
                             let rect_max_y = rect_max_y.round();
 
-                            rpass.set_viewport(
+                            render_pass.set_viewport(
                                 rect_min_x,
                                 rect_min_y,
                                 rect_max_x - rect_min_x,
@@ -436,7 +477,7 @@ impl RenderPass {
                                 pixels_per_point,
                                 screen_size_px: size_in_pixels,
                             },
-                            rpass,
+                            render_pass,
                             &self.paint_callback_resources,
                         );
                     }
@@ -444,10 +485,10 @@ impl RenderPass {
             }
         }
 
-        rpass.set_scissor_rect(0, 0, size_in_pixels[0], size_in_pixels[1]);
+        render_pass.set_scissor_rect(0, 0, size_in_pixels[0], size_in_pixels[1]);
     }
 
-    /// Should be called before `execute()`.
+    /// Should be called before `render()`.
     pub fn update_texture(
         &mut self,
         device: &wgpu::Device,
@@ -479,7 +520,7 @@ impl RenderPass {
                     image.pixels.len(),
                     "Mismatch between texture size and texel count"
                 );
-                Cow::Owned(image.srgba_pixels(1.0).collect::<Vec<_>>())
+                Cow::Owned(image.srgba_pixels(None).collect::<Vec<_>>())
             }
         };
         let data_bytes: &[u8] = bytemuck::cast_slice(data_color32.as_slice());
@@ -525,7 +566,7 @@ impl RenderPass {
                 mip_level_count: 1,
                 sample_count: 1,
                 dimension: wgpu::TextureDimension::D2,
-                format: wgpu::TextureFormat::Rgba8UnormSrgb,
+                format: wgpu::TextureFormat::Rgba8UnormSrgb, // TODO(emilk): handle WebGL1 where this is not always supported!
                 usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
             });
             let filter = match image_delta.filter {
@@ -726,8 +767,8 @@ impl RenderPass {
         *user_texture_binding = bind_group;
     }
 
-    /// Uploads the uniform, vertex and index data used by the render pass.
-    /// Should be called before `execute()`.
+    /// Uploads the uniform, vertex and index data used by the renderer.
+    /// Should be called before `render()`.
     pub fn update_buffers(
         &mut self,
         device: &wgpu::Device,
@@ -789,7 +830,7 @@ impl RenderPass {
                     let cbfn = if let Some(c) = callback.callback.downcast_ref::<CallbackFn>() {
                         c
                     } else {
-                        tracing::warn!("Unknown paint callback: expected `egui_gpu::CallbackFn`");
+                        tracing::warn!("Unknown paint callback: expected `egui_wgpu::CallbackFn`");
                         continue;
                     };
 
@@ -867,20 +908,17 @@ impl ScissorRect {
         let clip_max_x = clip_max_x.clamp(clip_min_x, target_size[0]);
         let clip_max_y = clip_max_y.clamp(clip_min_y, target_size[1]);
 
-        let width = (clip_max_x - clip_min_x).at_least(1);
-        let height = (clip_max_y - clip_min_y).at_least(1);
-
-        ScissorRect {
+        Self {
             x: clip_min_x,
             y: clip_min_y,
-            width,
-            height,
+            width: clip_max_x - clip_min_x,
+            height: clip_max_y - clip_min_y,
         }
     }
 }
 
 #[test]
-fn render_pass_impl_send_sync() {
+fn renderer_impl_send_sync() {
     fn assert_send_sync<T: Send + Sync>() {}
-    assert_send_sync::<RenderPass>();
+    assert_send_sync::<Renderer>();
 }

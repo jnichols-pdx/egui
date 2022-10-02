@@ -83,7 +83,10 @@ fn run_and_return(event_loop: &mut EventLoop<RequestRepaintEvent>, mut winit_app
 
     event_loop.run_return(|event, event_loop, control_flow| {
         let event_result = match &event {
-            winit::event::Event::LoopDestroyed => EventResult::Exit,
+            winit::event::Event::LoopDestroyed => {
+                tracing::debug!("winit::event::Event::LoopDestroyed");
+                EventResult::Exit
+            }
 
             // Platform-dependent event handlers to workaround a winit bug
             // See: https://github.com/rust-windowing/winit/issues/987
@@ -117,13 +120,17 @@ fn run_and_return(event_loop: &mut EventLoop<RequestRepaintEvent>, mut winit_app
         match event_result {
             EventResult::Wait => {}
             EventResult::RepaintAsap => {
-                tracing::debug!("Repaint caused by winit::Event: {:?}", event);
+                tracing::trace!("Repaint caused by winit::Event: {:?}", event);
                 next_repaint_time = Instant::now();
             }
             EventResult::RepaintAt(repaint_time) => {
                 next_repaint_time = next_repaint_time.min(repaint_time);
             }
             EventResult::Exit => {
+                // On Cmd-Q we get here and then `run_return` doesn't return,
+                // so we need to save state now:
+                tracing::debug!("Exiting event loop - saving app state…");
+                winit_app.save_and_destroy();
                 *control_flow = ControlFlow::Exit;
                 return;
             }
@@ -145,11 +152,10 @@ fn run_and_return(event_loop: &mut EventLoop<RequestRepaintEvent>, mut winit_app
 
     tracing::debug!("eframe window closed");
 
-    winit_app.save_and_destroy();
-
     drop(winit_app);
 
-    // Needed to clean the event_loop:
+    // On Windows this clears out events so that we can later create another window.
+    // See https://github.com/emilk/egui/pull/1889 for details.
     event_loop.run_return(|_, _, control_flow| {
         control_flow.set_exit();
     });
@@ -215,6 +221,27 @@ fn run_and_exit(
             }
         }
     })
+}
+
+fn centere_window_pos(
+    monitor: Option<winit::monitor::MonitorHandle>,
+    native_options: &mut epi::NativeOptions,
+) {
+    // Get the current_monitor.
+    if let Some(monitor) = monitor {
+        let monitor_size = monitor.size();
+        let inner_size = native_options
+            .initial_window_size
+            .unwrap_or(egui::Vec2 { x: 800.0, y: 600.0 });
+        if monitor_size.width > 0 && monitor_size.height > 0 {
+            let x = (monitor_size.width - inner_size.x as u32) / 2;
+            let y = (monitor_size.height - inner_size.y as u32) / 2;
+            native_options.initial_window_pos = Some(egui::Pos2 {
+                x: x as _,
+                y: y as _,
+            });
+        }
+    }
 }
 
 // ----------------------------------------------------------------------------
@@ -311,7 +338,7 @@ mod glow_integration {
                     .with_hardware_acceleration(hardware_acceleration)
                     .with_depth_buffer(native_options.depth_buffer)
                     .with_multisampling(native_options.multisampling)
-                    .with_srgb(true)
+                    .with_srgb(false)
                     .with_stencil_buffer(native_options.stencil_buffer)
                     .with_vsync(native_options.vsync)
                     .build_windowed(window_builder, event_loop)
@@ -337,8 +364,9 @@ mod glow_integration {
             );
             let gl = Arc::new(gl);
 
-            let painter = egui_glow::Painter::new(gl.clone(), None, "")
-                .unwrap_or_else(|error| panic!("some OpenGL error occurred {}\n", error));
+            let painter =
+                egui_glow::Painter::new(gl.clone(), "", self.native_options.shader_version)
+                    .unwrap_or_else(|error| panic!("some OpenGL error occurred {}\n", error));
 
             let system_theme = self.native_options.system_theme();
             let mut integration = epi_integration::EpiIntegration::new(
@@ -353,6 +381,11 @@ mod glow_integration {
             );
             let theme = system_theme.unwrap_or(self.native_options.default_theme);
             integration.egui_ctx.set_visuals(theme.egui_visuals());
+
+            gl_window.window().set_ime_allowed(true);
+            if self.native_options.mouse_passthrough {
+                gl_window.window().set_cursor_hittest(false).unwrap();
+            }
 
             {
                 let event_loop_proxy = self.repaint_proxy.clone();
@@ -400,7 +433,7 @@ mod glow_integration {
         }
 
         fn save_and_destroy(&mut self) {
-            if let Some(running) = &mut self.running {
+            if let Some(mut running) = self.running.take() {
                 running
                     .integration
                     .save(running.app.as_mut(), running.gl_window.window());
@@ -579,13 +612,22 @@ mod glow_integration {
         app_creator: epi::AppCreator,
     ) {
         if native_options.run_and_return {
-            with_event_loop(native_options, |event_loop, native_options| {
+            with_event_loop(native_options, |event_loop, mut native_options| {
+                if native_options.centered {
+                    centere_window_pos(event_loop.available_monitors().next(), &mut native_options);
+                }
+
                 let glow_eframe =
                     GlowWinitApp::new(event_loop, app_name, native_options, app_creator);
                 run_and_return(event_loop, glow_eframe);
             });
         } else {
             let event_loop = create_event_loop_builder(&mut native_options).build();
+
+            if native_options.centered {
+                centere_window_pos(event_loop.available_monitors().next(), &mut native_options);
+            }
+
             let glow_eframe = GlowWinitApp::new(&event_loop, app_name, native_options, app_creator);
             run_and_exit(event_loop, glow_eframe);
         }
@@ -682,6 +724,12 @@ mod wgpu_integration {
             storage: Option<Box<dyn epi::Storage>>,
             window: winit::window::Window,
         ) {
+            let mut limits = wgpu::Limits::downlevel_webgl2_defaults();
+            if self.native_options.depth_buffer > 0 {
+                // When using a depth buffer, we have to be able to create a texture large enough for the entire surface.
+                limits.max_texture_dimension_2d = 8192;
+            }
+
             #[allow(unsafe_code, unused_mut, unused_unsafe)]
             let painter = unsafe {
                 let mut painter = egui_wgpu::winit::Painter::new(
@@ -690,10 +738,11 @@ mod wgpu_integration {
                     wgpu::DeviceDescriptor {
                         label: None,
                         features: wgpu::Features::default(),
-                        limits: wgpu::Limits::downlevel_webgl2_defaults(),
+                        limits,
                     },
                     wgpu::PresentMode::Fifo,
                     self.native_options.multisampling.max(1) as _,
+                    self.native_options.depth_buffer,
                 );
                 painter.set_window(Some(&window));
                 painter
@@ -714,6 +763,8 @@ mod wgpu_integration {
             );
             let theme = system_theme.unwrap_or(self.native_options.default_theme);
             integration.egui_ctx.set_visuals(theme.egui_visuals());
+
+            window.set_ime_allowed(true);
 
             {
                 let event_loop_proxy = self.repaint_proxy.clone();
@@ -764,7 +815,7 @@ mod wgpu_integration {
         }
 
         fn save_and_destroy(&mut self) {
-            if let Some(running) = &mut self.running {
+            if let Some(mut running) = self.running.take() {
                 if let Some(window) = &self.window {
                     running.integration.save(running.app.as_mut(), window);
                 }
@@ -941,13 +992,22 @@ mod wgpu_integration {
         app_creator: epi::AppCreator,
     ) {
         if native_options.run_and_return {
-            with_event_loop(native_options, |event_loop, native_options| {
+            with_event_loop(native_options, |event_loop, mut native_options| {
+                if native_options.centered {
+                    centere_window_pos(event_loop.available_monitors().next(), &mut native_options);
+                }
+
                 let wgpu_eframe =
                     WgpuWinitApp::new(event_loop, app_name, native_options, app_creator);
                 run_and_return(event_loop, wgpu_eframe);
             });
         } else {
             let event_loop = create_event_loop_builder(&mut native_options).build();
+
+            if native_options.centered {
+                centere_window_pos(event_loop.available_monitors().next(), &mut native_options);
+            }
+
             let wgpu_eframe = WgpuWinitApp::new(&event_loop, app_name, native_options, app_creator);
             run_and_exit(event_loop, wgpu_eframe);
         }
