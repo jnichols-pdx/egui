@@ -76,14 +76,15 @@ pub struct Slider<'a> {
     orientation: SliderOrientation,
     prefix: String,
     suffix: String,
-    text: String,
-    text_color: Option<Color32>,
+    text: WidgetText,
     /// Sets the minimal step of the widget value
     step: Option<f64>,
+    drag_value_speed: Option<f64>,
     min_decimals: usize,
     max_decimals: Option<usize>,
     custom_formatter: Option<NumFormatter<'a>>,
     custom_parser: Option<NumParser<'a>>,
+    trailing_fill: Option<bool>,
 }
 
 impl<'a> Slider<'a> {
@@ -123,12 +124,13 @@ impl<'a> Slider<'a> {
             prefix: Default::default(),
             suffix: Default::default(),
             text: Default::default(),
-            text_color: None,
             step: None,
+            drag_value_speed: None,
             min_decimals: 0,
             max_decimals: None,
             custom_formatter: None,
             custom_parser: None,
+            trailing_fill: None,
         }
     }
 
@@ -152,13 +154,13 @@ impl<'a> Slider<'a> {
     }
 
     /// Show a text next to the slider (e.g. explaining what the slider controls).
-    pub fn text(mut self, text: impl ToString) -> Self {
-        self.text = text.to_string();
+    pub fn text(mut self, text: impl Into<WidgetText>) -> Self {
+        self.text = text.into();
         self
     }
 
     pub fn text_color(mut self, text_color: Color32) -> Self {
-        self.text_color = Some(text_color);
+        self.text = self.text.color(text_color);
         self
     }
 
@@ -214,6 +216,7 @@ impl<'a> Slider<'a> {
     }
 
     /// Sets the minimal change of the value.
+    ///
     /// Value `0.0` effectively disables the feature. If the new value is out of range
     /// and `clamp_to_range` is enabled, you would not have the ability to change the value.
     ///
@@ -223,8 +226,22 @@ impl<'a> Slider<'a> {
         self
     }
 
+    /// When dragging the value, how fast does it move?
+    ///
+    /// Unit: values per point (logical pixel).
+    /// See also [`DragValue::speed`].
+    ///
+    /// By default this is the same speed as when dragging the slider,
+    /// but you can change it here to for instance have a much finer control
+    /// by dragging the slider value rather than the slider itself.
+    pub fn drag_value_speed(mut self, drag_value_speed: f64) -> Self {
+        self.drag_value_speed = Some(drag_value_speed);
+        self
+    }
+
     // TODO(emilk): we should also have a "min precision".
     /// Set a minimum number of decimals to display.
+    ///
     /// Normally you don't need to pick a precision, as the slider will intelligently pick a precision for you.
     /// Regardless of precision the slider will use "smart aim" to help the user select nice, round values.
     pub fn min_decimals(mut self, min_decimals: usize) -> Self {
@@ -234,6 +251,7 @@ impl<'a> Slider<'a> {
 
     // TODO(emilk): we should also have a "max precision".
     /// Set a maximum number of decimals to display.
+    ///
     /// Values will also be rounded to this number of decimals.
     /// Normally you don't need to pick a precision, as the slider will intelligently pick a precision for you.
     /// Regardless of precision the slider will use "smart aim" to help the user select nice, round values.
@@ -243,12 +261,24 @@ impl<'a> Slider<'a> {
     }
 
     /// Set an exact number of decimals to display.
+    ///
     /// Values will also be rounded to this number of decimals.
     /// Normally you don't need to pick a precision, as the slider will intelligently pick a precision for you.
     /// Regardless of precision the slider will use "smart aim" to help the user select nice, round values.
     pub fn fixed_decimals(mut self, num_decimals: usize) -> Self {
         self.min_decimals = num_decimals;
         self.max_decimals = Some(num_decimals);
+        self
+    }
+
+    /// Display trailing color behind the slider's circle. Default is OFF.
+    ///
+    /// This setting can be enabled globally for all sliders with [`Visuals::slider_trailing_fill`].
+    /// Toggling it here will override the above setting ONLY for this individual slider.
+    ///
+    /// The fill color will be taken from `selection.bg_fill` in your [`Visuals`], the same as a [`ProgressBar`].
+    pub fn trailing_fill(mut self, trailing_fill: bool) -> Self {
+        self.trailing_fill = Some(trailing_fill);
         self
     }
 
@@ -452,7 +482,7 @@ impl<'a> Slider<'a> {
     /// If you use one of the integer constructors (e.g. `Slider::i32`) this is called for you,
     /// but if you want to have a slider for picking integer values in an `Slider::f64`, use this.
     pub fn integer(self) -> Self {
-        self.fixed_decimals(0).smallest_positive(1.0)
+        self.fixed_decimals(0).smallest_positive(1.0).step_by(1.0)
     }
 
     fn get_value(&mut self) -> f64 {
@@ -512,7 +542,7 @@ impl<'a> Slider<'a> {
             SliderOrientation::Horizontal => vec2(ui.spacing().slider_width, thickness),
             SliderOrientation::Vertical => vec2(thickness, ui.spacing().slider_width),
         };
-        ui.allocate_response(desired_size, Sense::click_and_drag())
+        ui.allocate_response(desired_size, Sense::drag())
     }
 
     /// Just the slider, no text
@@ -523,7 +553,7 @@ impl<'a> Slider<'a> {
         if let Some(pointer_position_2d) = response.interact_pointer_pos() {
             let position = self.pointer_position(pointer_position_2d);
             let new_value = if self.smart_aim {
-                let aim_radius = ui.input().aim_radius();
+                let aim_radius = ui.input(|i| i.aim_radius());
                 emath::smart_aim::best_in_range_f64(
                     self.value_from_position(position - aim_radius, position_range.clone()),
                     self.value_from_position(position + aim_radius, position_range.clone()),
@@ -534,6 +564,9 @@ impl<'a> Slider<'a> {
             self.set_value(new_value);
         }
 
+        let mut decrement = 0usize;
+        let mut increment = 0usize;
+
         if response.has_focus() {
             let (dec_key, inc_key) = match self.orientation {
                 SliderOrientation::Horizontal => (Key::ArrowLeft, Key::ArrowRight),
@@ -542,33 +575,51 @@ impl<'a> Slider<'a> {
                 SliderOrientation::Vertical => (Key::ArrowUp, Key::ArrowDown),
             };
 
-            let decrement = ui.input().num_presses(dec_key);
-            let increment = ui.input().num_presses(inc_key);
-            let kb_step = increment as f32 - decrement as f32;
+            ui.input(|input| {
+                decrement += input.num_presses(dec_key);
+                increment += input.num_presses(inc_key);
+            });
+        }
 
-            if kb_step != 0.0 {
-                let prev_value = self.get_value();
-                let prev_position = self.position_from_value(prev_value, position_range.clone());
-                let new_position = prev_position + kb_step;
-                let new_value = match self.step {
-                    Some(step) => prev_value + (kb_step as f64 * step),
-                    None if self.smart_aim => {
-                        let aim_radius = ui.input().aim_radius();
-                        emath::smart_aim::best_in_range_f64(
-                            self.value_from_position(
-                                new_position - aim_radius,
-                                position_range.clone(),
-                            ),
-                            self.value_from_position(
-                                new_position + aim_radius,
-                                position_range.clone(),
-                            ),
-                        )
+        #[cfg(feature = "accesskit")]
+        {
+            use accesskit::Action;
+            ui.input(|input| {
+                decrement += input.num_accesskit_action_requests(response.id, Action::Decrement);
+                increment += input.num_accesskit_action_requests(response.id, Action::Increment);
+            });
+        }
+
+        let kb_step = increment as f32 - decrement as f32;
+
+        if kb_step != 0.0 {
+            let prev_value = self.get_value();
+            let prev_position = self.position_from_value(prev_value, position_range.clone());
+            let new_position = prev_position + kb_step;
+            let new_value = match self.step {
+                Some(step) => prev_value + (kb_step as f64 * step),
+                None if self.smart_aim => {
+                    let aim_radius = ui.input(|i| i.aim_radius());
+                    emath::smart_aim::best_in_range_f64(
+                        self.value_from_position(new_position - aim_radius, position_range.clone()),
+                        self.value_from_position(new_position + aim_radius, position_range.clone()),
+                    )
+                }
+                _ => self.value_from_position(new_position, position_range.clone()),
+            };
+            self.set_value(new_value);
+        }
+
+        #[cfg(feature = "accesskit")]
+        {
+            use accesskit::{Action, ActionData};
+            ui.input(|input| {
+                for request in input.accesskit_action_requests(response.id, Action::SetValue) {
+                    if let Some(ActionData::NumericValue(new_value)) = request.data {
+                        self.set_value(new_value);
                     }
-                    _ => self.value_from_position(new_position, position_range.clone()),
-                };
-                self.set_value(new_value);
-            }
+                }
+            });
         }
 
         // Paint it:
@@ -578,21 +629,39 @@ impl<'a> Slider<'a> {
             let rail_radius = ui.painter().round_to_pixel(self.rail_radius_limit(rect));
             let rail_rect = self.rail_rect(rect, rail_radius);
 
-            let position_1d = self.position_from_value(value, position_range);
-
             let visuals = ui.style().interact(response);
-            ui.painter().add(epaint::RectShape {
-                rect: rail_rect,
-                rounding: ui.visuals().widgets.inactive.rounding,
-                fill: ui.visuals().widgets.inactive.bg_fill,
-                // fill: visuals.bg_fill,
-                // fill: ui.visuals().extreme_bg_color,
-                stroke: Default::default(),
-                // stroke: visuals.bg_stroke,
-                // stroke: ui.visuals().widgets.inactive.bg_stroke,
-            });
+            let widget_visuals = &ui.visuals().widgets;
 
+            ui.painter().rect_filled(
+                rail_rect,
+                widget_visuals.inactive.rounding,
+                widget_visuals.inactive.bg_fill,
+            );
+
+            let position_1d = self.position_from_value(value, position_range);
             let center = self.marker_center(position_1d, &rail_rect);
+
+            // Decide if we should add trailing fill.
+            let trailing_fill = self
+                .trailing_fill
+                .unwrap_or_else(|| ui.visuals().slider_trailing_fill);
+
+            // Paint trailing fill.
+            if trailing_fill {
+                let mut trailing_rail_rect = rail_rect;
+
+                // The trailing rect has to be drawn differently depending on the orientation.
+                match self.orientation {
+                    SliderOrientation::Vertical => trailing_rail_rect.min.y = center.y,
+                    SliderOrientation::Horizontal => trailing_rail_rect.max.x = center.x,
+                };
+
+                ui.painter().rect_filled(
+                    trailing_rail_rect,
+                    widget_visuals.inactive.rounding,
+                    ui.visuals().selection.bg_fill,
+                );
+            }
 
             ui.painter().add(epaint::CircleShape {
                 center,
@@ -659,18 +728,21 @@ impl<'a> Slider<'a> {
 
     fn value_ui(&mut self, ui: &mut Ui, position_range: RangeInclusive<f32>) -> Response {
         // If [`DragValue`] is controlled from the keyboard and `step` is defined, set speed to `step`
-        let change = {
-            // Hold one lock rather than 4 (see https://github.com/emilk/egui/pull/1380).
-            let input = ui.input();
-
+        let change = ui.input(|input| {
             input.num_presses(Key::ArrowUp) as i32 + input.num_presses(Key::ArrowRight) as i32
                 - input.num_presses(Key::ArrowDown) as i32
                 - input.num_presses(Key::ArrowLeft) as i32
+        });
+
+        let any_change = change != 0;
+        let speed = if let (Some(step), true) = (self.step, any_change) {
+            // If [`DragValue`] is controlled from the keyboard and `step` is defined, set speed to `step`
+            step
+        } else {
+            self.drag_value_speed
+                .unwrap_or_else(|| self.current_gradient(&position_range))
         };
-        let speed = match self.step {
-            Some(step) if change != 0 => step,
-            _ => self.current_gradient(&position_range),
-        };
+
         let mut value = self.get_value();
         let response = ui.add({
             let mut dv = DragValue::new(&mut value)
@@ -707,13 +779,39 @@ impl<'a> Slider<'a> {
     }
 
     fn add_contents(&mut self, ui: &mut Ui) -> Response {
+        let old_value = self.get_value();
+
         let thickness = ui
             .text_style_height(&TextStyle::Body)
             .at_least(ui.spacing().interact_size.y);
         let mut response = self.allocate_slider_space(ui, thickness);
         self.slider_ui(ui, &response);
 
-        if self.show_value {
+        let value = self.get_value();
+        response.changed = value != old_value;
+        response.widget_info(|| WidgetInfo::slider(value, self.text.text()));
+
+        #[cfg(feature = "accesskit")]
+        ui.ctx().accesskit_node_builder(response.id, |builder| {
+            use accesskit::Action;
+            builder.set_min_numeric_value(*self.range.start());
+            builder.set_max_numeric_value(*self.range.end());
+            if let Some(step) = self.step {
+                builder.set_numeric_value_step(step);
+            }
+            builder.add_action(Action::SetValue);
+            let clamp_range = self.clamp_range();
+            if value < *clamp_range.end() {
+                builder.add_action(Action::Increment);
+            }
+            if value > *clamp_range.start() {
+                builder.add_action(Action::Decrement);
+            }
+        });
+
+        let slider_response = response.clone();
+
+        let value_response = if self.show_value {
             let position_range = self.position_range(&response.rect);
             let value_response = self.value_ui(ui, position_range);
             if value_response.gained_focus()
@@ -725,14 +823,23 @@ impl<'a> Slider<'a> {
                 response = value_response.union(response);
             } else {
                 // Use the slider id as the id for the whole widget
-                response = response.union(value_response);
+                response = response.union(value_response.clone());
             }
-        }
+            Some(value_response)
+        } else {
+            None
+        };
 
         if !self.text.is_empty() {
-            let text_color = self.text_color.unwrap_or_else(|| ui.visuals().text_color());
-            let text = RichText::new(&self.text).color(text_color);
-            ui.add(Label::new(text).wrap(false));
+            let label_response = ui.add(Label::new(self.text.clone()).wrap(false));
+            // The slider already has an accessibility label via widget info,
+            // but sometimes it's useful for a screen reader to know
+            // that a piece of text is a label for another widget,
+            // e.g. so the text itself can be excluded from navigation.
+            slider_response.labelled_by(label_response.id);
+            if let Some(value_response) = value_response {
+                value_response.labelled_by(label_response.id);
+            }
         }
 
         response
@@ -741,18 +848,12 @@ impl<'a> Slider<'a> {
 
 impl<'a> Widget for Slider<'a> {
     fn ui(mut self, ui: &mut Ui) -> Response {
-        let old_value = self.get_value();
-
         let inner_response = match self.orientation {
             SliderOrientation::Horizontal => ui.horizontal(|ui| self.add_contents(ui)),
             SliderOrientation::Vertical => ui.vertical(|ui| self.add_contents(ui)),
         };
 
-        let mut response = inner_response.inner | inner_response.response;
-        let value = self.get_value();
-        response.changed = value != old_value;
-        response.widget_info(|| WidgetInfo::slider(value, &self.text));
-        response
+        inner_response.inner | inner_response.response
     }
 }
 

@@ -1,4 +1,4 @@
-use egui::{Context, ScrollArea, Ui};
+use egui::{Context, Modifiers, ScrollArea, Ui};
 use std::collections::BTreeSet;
 
 use super::About;
@@ -90,6 +90,7 @@ impl Default for Tests {
     fn default() -> Self {
         Self::from_demos(vec![
             Box::new(super::tests::CursorTest::default()),
+            Box::new(super::highlighting::Highlighting::default()),
             Box::new(super::tests::IdTest::default()),
             Box::new(super::tests::InputTest::default()),
             Box::new(super::layout_test::LayoutTest::default()),
@@ -177,7 +178,7 @@ impl DemoWindows {
 
     fn mobile_ui(&mut self, ctx: &Context) {
         if self.about_is_open {
-            let screen_size = ctx.input().screen_rect.size();
+            let screen_size = ctx.input(|i| i.screen_rect.size());
             let default_width = (screen_size.x - 20.0).min(400.0);
 
             let mut close = false;
@@ -216,7 +217,7 @@ impl DemoWindows {
                 ui.menu_button(egui::RichText::new("⏷ demos").size(font_size), |ui| {
                     ui.set_style(ui.ctx().style()); // ignore the "menu" style set by `menu_button`.
                     self.demo_list_ui(ui);
-                    if ui.ui_contains_pointer() && ui.input().pointer.any_click() {
+                    if ui.ui_contains_pointer() && ui.input(|i| i.pointer.any_click()) {
                         ui.close_menu();
                     }
                 });
@@ -239,7 +240,7 @@ impl DemoWindows {
     fn desktop_ui(&mut self, ctx: &Context) {
         egui::SidePanel::right("egui_demo_panel")
             .resizable(false)
-            .default_width(145.0)
+            .default_width(150.0)
             .show(ctx, |ui| {
                 egui::trace!(ui);
                 ui.vertical_centered(|ui| {
@@ -291,7 +292,7 @@ impl DemoWindows {
                 ui.separator();
 
                 if ui.button("Organize windows").clicked() {
-                    ui.ctx().memory().reset_areas();
+                    ui.ctx().memory_mut(|mem| mem.reset_areas());
                 }
             });
         });
@@ -301,17 +302,53 @@ impl DemoWindows {
 // ----------------------------------------------------------------------------
 
 fn file_menu_button(ui: &mut Ui) {
+    let organize_shortcut =
+        egui::KeyboardShortcut::new(Modifiers::CTRL | Modifiers::SHIFT, egui::Key::O);
+    let reset_shortcut =
+        egui::KeyboardShortcut::new(Modifiers::CTRL | Modifiers::SHIFT, egui::Key::R);
+
+    // NOTE: we must check the shortcuts OUTSIDE of the actual "File" menu,
+    // or else they would only be checked if the "File" menu was actually open!
+
+    if ui.input_mut(|i| i.consume_shortcut(&organize_shortcut)) {
+        ui.ctx().memory_mut(|mem| mem.reset_areas());
+    }
+
+    if ui.input_mut(|i| i.consume_shortcut(&reset_shortcut)) {
+        ui.ctx().memory_mut(|mem| *mem = Default::default());
+    }
+
     ui.menu_button("File", |ui| {
-        if ui.button("Organize windows").clicked() {
-            ui.ctx().memory().reset_areas();
+        ui.set_min_width(220.0);
+        ui.style_mut().wrap = Some(false);
+
+        // On the web the browser controls the zoom
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            egui::gui_zoom::zoom_menu_buttons(ui, None);
+            ui.separator();
+        }
+
+        if ui
+            .add(
+                egui::Button::new("Organize Windows")
+                    .shortcut_text(ui.ctx().format_shortcut(&organize_shortcut)),
+            )
+            .clicked()
+        {
+            ui.ctx().memory_mut(|mem| mem.reset_areas());
             ui.close_menu();
         }
+
         if ui
-            .button("Reset egui memory")
+            .add(
+                egui::Button::new("Reset egui memory")
+                    .shortcut_text(ui.ctx().format_shortcut(&reset_shortcut)),
+            )
             .on_hover_text("Forget scroll, positions, sizes etc")
             .clicked()
         {
-            *ui.ctx().memory() = Default::default();
+            ui.ctx().memory_mut(|mem| *mem = Default::default());
             ui.close_menu();
         }
     });

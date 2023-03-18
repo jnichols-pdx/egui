@@ -48,9 +48,9 @@
 //! /// Call this once from the HTML.
 //! #[cfg(target_arch = "wasm32")]
 //! #[wasm_bindgen]
-//! pub fn start(canvas_id: &str) -> Result<AppRunnerRef, eframe::wasm_bindgen::JsValue> {
+//! pub async fn start(canvas_id: &str) -> Result<AppRunnerRef, eframe::wasm_bindgen::JsValue> {
 //!     let web_options = eframe::WebOptions::default();
-//!     eframe::start_web(canvas_id, web_options, Box::new(|cc| Box::new(MyEguiApp::new(cc))))
+//!     eframe::start_web(canvas_id, web_options, Box::new(|cc| Box::new(MyEguiApp::new(cc)))).await
 //! }
 //! ```
 //!
@@ -103,18 +103,32 @@ pub use web_sys;
 /// /// You can add more callbacks like this if you want to call in to your code.
 /// #[cfg(target_arch = "wasm32")]
 /// #[wasm_bindgen]
-/// pub fn start(canvas_id: &str) -> Result<AppRunnerRef>, eframe::wasm_bindgen::JsValue> {
+/// pub struct WebHandle {
+///     handle: AppRunnerRef,
+/// }
+/// #[cfg(target_arch = "wasm32")]
+/// #[wasm_bindgen]
+/// pub async fn start(canvas_id: &str) -> Result<WebHandle, eframe::wasm_bindgen::JsValue> {
 ///     let web_options = eframe::WebOptions::default();
-///     eframe::start_web(canvas_id, web_options, Box::new(|cc| Box::new(MyEguiApp::new(cc))))
+///     eframe::start_web(
+///         canvas_id,
+///         web_options,
+///         Box::new(|cc| Box::new(MyEguiApp::new(cc))),
+///     )
+///     .await
+///     .map(|handle| WebHandle { handle })
 /// }
 /// ```
+///
+/// # Errors
+/// Failing to initialize WebGL graphics.
 #[cfg(target_arch = "wasm32")]
-pub fn start_web(
+pub async fn start_web(
     canvas_id: &str,
     web_options: WebOptions,
     app_creator: AppCreator,
-) -> Result<AppRunnerRef, wasm_bindgen::JsValue> {
-    let handle = web::start(canvas_id, web_options, app_creator)?;
+) -> std::result::Result<AppRunnerRef, wasm_bindgen::JsValue> {
+    let handle = web::start(canvas_id, web_options, app_creator).await?;
 
     Ok(handle)
 }
@@ -123,6 +137,7 @@ pub fn start_web(
 // When compiling natively
 
 #[cfg(not(target_arch = "wasm32"))]
+#[cfg(any(feature = "glow", feature = "wgpu"))]
 mod native;
 
 /// This is how you start a native (desktop) app.
@@ -160,46 +175,88 @@ mod native;
 ///    }
 /// }
 /// ```
+///
+/// # Errors
+/// This function can fail if we fail to set up a graphics context.
 #[cfg(not(target_arch = "wasm32"))]
 #[allow(clippy::needless_pass_by_value)]
-pub fn run_native(app_name: &str, native_options: NativeOptions, app_creator: AppCreator) {
+#[cfg(any(feature = "glow", feature = "wgpu"))]
+pub fn run_native(
+    app_name: &str,
+    native_options: NativeOptions,
+    app_creator: AppCreator,
+) -> Result<()> {
     let renderer = native_options.renderer;
+
+    #[cfg(not(feature = "__screenshot"))]
+    assert!(
+        std::env::var("EFRAME_SCREENSHOT_TO").is_err(),
+        "EFRAME_SCREENSHOT_TO found without compiling with the '__screenshot' feature"
+    );
 
     match renderer {
         #[cfg(feature = "glow")]
         Renderer::Glow => {
             tracing::debug!("Using the glow renderer");
-            native::run::run_glow(app_name, native_options, app_creator);
+            native::run::run_glow(app_name, native_options, app_creator)
         }
 
         #[cfg(feature = "wgpu")]
         Renderer::Wgpu => {
             tracing::debug!("Using the wgpu renderer");
-            native::run::run_wgpu(app_name, native_options, app_creator);
+            native::run::run_wgpu(app_name, native_options, app_creator)
         }
     }
 }
 
+// ----------------------------------------------------------------------------
+
+/// The different problems that can occur when trying to run `eframe`.
+#[derive(thiserror::Error, Debug)]
+pub enum Error {
+    #[cfg(not(target_arch = "wasm32"))]
+    #[error("winit error: {0}")]
+    Winit(#[from] winit::error::OsError),
+
+    #[cfg(all(feature = "glow", not(target_arch = "wasm32")))]
+    #[error("glutin error: {0}")]
+    Glutin(#[from] glutin::error::Error),
+
+    #[cfg(all(feature = "glow", not(target_arch = "wasm32")))]
+    #[error("Found no glutin configs matching the template: {0:?}. error: {1:?}")]
+    NoGlutinConfigs(glutin::config::ConfigTemplate, Box<dyn std::error::Error>),
+
+    #[cfg(feature = "wgpu")]
+    #[error("WGPU error: {0}")]
+    Wgpu(#[from] egui_wgpu::WgpuError),
+}
+
+pub type Result<T> = std::result::Result<T, Error>;
+
 // ---------------------------------------------------------------------------
 
-/// Profiling macro for feature "puffin"
 #[cfg(not(target_arch = "wasm32"))]
-macro_rules! profile_function {
+#[cfg(any(feature = "glow", feature = "wgpu"))]
+mod profiling_scopes {
+    /// Profiling macro for feature "puffin"
+    macro_rules! profile_function {
     ($($arg: tt)*) => {
         #[cfg(feature = "puffin")]
         puffin::profile_function!($($arg)*);
     };
 }
-#[cfg(not(target_arch = "wasm32"))]
-pub(crate) use profile_function;
+    pub(crate) use profile_function;
 
-/// Profiling macro for feature "puffin"
-#[cfg(not(target_arch = "wasm32"))]
-macro_rules! profile_scope {
+    /// Profiling macro for feature "puffin"
+    macro_rules! profile_scope {
     ($($arg: tt)*) => {
         #[cfg(feature = "puffin")]
         puffin::profile_scope!($($arg)*);
     };
 }
+    pub(crate) use profile_scope;
+}
+
 #[cfg(not(target_arch = "wasm32"))]
-pub(crate) use profile_scope;
+#[cfg(any(feature = "glow", feature = "wgpu"))]
+pub(crate) use profiling_scopes::*;

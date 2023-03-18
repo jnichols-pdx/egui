@@ -81,7 +81,7 @@ impl Default for BackendPanel {
 impl BackendPanel {
     pub fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
         self.frame_history
-            .on_new_frame(ctx.input().time, frame.info().cpu_usage);
+            .on_new_frame(ctx.input(|i| i.time), frame.info().cpu_usage);
 
         match self.run_mode {
             RunMode::Continuous => {
@@ -130,10 +130,12 @@ impl BackendPanel {
 
         ui.separator();
 
+        #[cfg(target_arch = "wasm32")]
+        #[cfg(feature = "web_screen-reader")]
         {
-            let mut screen_reader = ui.ctx().options().screen_reader;
+            let mut screen_reader = ui.ctx().options(|o| o.screen_reader);
             ui.checkbox(&mut screen_reader, "🔈 Screen reader").on_hover_text("Experimental feature: checking this will turn on the screen reader on supported platforms");
-            ui.ctx().options().screen_reader = screen_reader;
+            ui.ctx().options_mut(|o| o.screen_reader = screen_reader);
         }
 
         #[cfg(not(target_arch = "wasm32"))]
@@ -161,13 +163,10 @@ impl BackendPanel {
             ui.monospace(format!("{:#?}", frame.info().web_info.location));
         });
 
-        // For instance: `eframe` web sets `pixels_per_point` every frame to force
-        // egui to use the same scale as the web zoom factor.
-        let integration_controls_pixels_per_point = ui.input().raw.pixels_per_point.is_some();
+        // On web, the browser controls `pixels_per_point`.
+        let integration_controls_pixels_per_point = frame.is_web();
         if !integration_controls_pixels_per_point {
-            if let Some(new_pixels_per_point) = self.pixels_per_point_ui(ui, &frame.info()) {
-                ui.ctx().set_pixels_per_point(new_pixels_per_point);
-            }
+            self.pixels_per_point_ui(ui, &frame.info());
         }
 
         #[cfg(not(target_arch = "wasm32"))]
@@ -175,9 +174,13 @@ impl BackendPanel {
             ui.horizontal(|ui| {
                 {
                     let mut fullscreen = frame.info().window_info.fullscreen;
-                    ui.checkbox(&mut fullscreen, "🗖 Fullscreen")
-                        .on_hover_text("Fullscreen the window");
-                    frame.set_fullscreen(fullscreen);
+                    if ui
+                        .checkbox(&mut fullscreen, "🗖 Fullscreen (F11)")
+                        .on_hover_text("Fullscreen the window")
+                        .changed()
+                    {
+                        frame.set_fullscreen(fullscreen);
+                    }
                 }
 
                 if ui
@@ -202,27 +205,36 @@ impl BackendPanel {
         }
     }
 
-    fn pixels_per_point_ui(
-        &mut self,
-        ui: &mut egui::Ui,
-        info: &eframe::IntegrationInfo,
-    ) -> Option<f32> {
-        let pixels_per_point = self.pixels_per_point.get_or_insert_with(|| {
-            info.native_pixels_per_point
-                .unwrap_or_else(|| ui.ctx().pixels_per_point())
-        });
+    fn pixels_per_point_ui(&mut self, ui: &mut egui::Ui, info: &eframe::IntegrationInfo) {
+        let pixels_per_point = self
+            .pixels_per_point
+            .get_or_insert_with(|| ui.ctx().pixels_per_point());
+
+        let mut reset = false;
 
         ui.horizontal(|ui| {
             ui.spacing_mut().slider_width = 90.0;
-            ui.add(
-                egui::Slider::new(pixels_per_point, 0.5..=5.0)
-                    .logarithmic(true)
-                    .clamp_to_range(true)
-                    .text("Scale"),
-            )
-            .on_hover_text("Physical pixels per point.");
+
+            let response = ui
+                .add(
+                    egui::Slider::new(pixels_per_point, 0.5..=5.0)
+                        .logarithmic(true)
+                        .clamp_to_range(true)
+                        .text("Scale"),
+                )
+                .on_hover_text("Physical pixels per point.");
+
+            if response.drag_released() {
+                // We wait until mouse release to activate:
+                ui.ctx().set_pixels_per_point(*pixels_per_point);
+                reset = true;
+            } else if !response.is_pointer_button_down_on() {
+                // When not dragging, show the current pixels_per_point so others can change it.
+                reset = true;
+            }
+
             if let Some(native_pixels_per_point) = info.native_pixels_per_point {
-                let enabled = *pixels_per_point != native_pixels_per_point;
+                let enabled = ui.ctx().pixels_per_point() != native_pixels_per_point;
                 if ui
                     .add_enabled(enabled, egui::Button::new("Reset"))
                     .on_hover_text(format!(
@@ -231,16 +243,13 @@ impl BackendPanel {
                     ))
                     .clicked()
                 {
-                    *pixels_per_point = native_pixels_per_point;
+                    ui.ctx().set_pixels_per_point(native_pixels_per_point);
                 }
             }
         });
 
-        // We wait until mouse release to activate:
-        if ui.ctx().is_using_pointer() {
-            None
-        } else {
-            Some(*pixels_per_point)
+        if reset {
+            self.pixels_per_point = None;
         }
     }
 
@@ -332,9 +341,11 @@ impl EguiWindows {
             output_event_history,
         } = self;
 
-        for event in &ctx.output().events {
-            output_event_history.push_back(event.clone());
-        }
+        ctx.output(|o| {
+            for event in &o.events {
+                output_event_history.push_back(event.clone());
+            }
+        });
         while output_event_history.len() > 1000 {
             output_event_history.pop_front();
         }

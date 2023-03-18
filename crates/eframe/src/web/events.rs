@@ -1,5 +1,8 @@
-use super::*;
 use std::sync::atomic::{AtomicBool, Ordering};
+
+use egui::Key;
+
+use super::*;
 
 struct IsDestroyed(pub bool);
 
@@ -13,7 +16,6 @@ pub fn paint_and_schedule(
 
         if !is_destroyed && runner_lock.needs_repaint.when_to_repaint() <= now_sec() {
             runner_lock.needs_repaint.clear();
-            runner_lock.clear_color_buffer();
             let (repaint_after, clipped_primitives) = runner_lock.logic()?;
             runner_lock.paint(&clipped_primitives)?;
             runner_lock
@@ -29,7 +31,6 @@ pub fn paint_and_schedule(
         runner_ref: AppRunnerRef,
         panicked: Arc<AtomicBool>,
     ) -> Result<(), JsValue> {
-        use wasm_bindgen::JsCast;
         let window = web_sys::window().unwrap();
         let closure = Closure::once(move || paint_and_schedule(&runner_ref, panicked));
         window.request_animation_frame(closure.as_ref().unchecked_ref())?;
@@ -65,11 +66,13 @@ pub fn install_document_events(runner_container: &mut AppRunnerContainer) -> Res
             runner_lock.input.raw.modifiers = modifiers;
 
             let key = event.key();
+            let egui_key = translate_key(&key);
 
-            if let Some(key) = translate_key(&key) {
+            if let Some(key) = egui_key {
                 runner_lock.input.raw.events.push(egui::Event::Key {
                     key,
                     pressed: true,
+                    repeat: false, // egui will fill this in for us!
                     modifiers,
                 });
             }
@@ -85,10 +88,18 @@ pub fn install_document_events(runner_container: &mut AppRunnerContainer) -> Res
 
             let egui_wants_keyboard = runner_lock.egui_ctx().wants_keyboard_input();
 
-            let prevent_default = if matches!(event.key().as_str(), "Tab") {
+            #[allow(clippy::if_same_then_else)]
+            let prevent_default = if egui_key == Some(Key::Tab) {
                 // Always prevent moving cursor to url bar.
                 // egui wants to use tab to move to the next text field.
                 true
+            } else if egui_key == Some(Key::P) {
+                #[allow(clippy::needless_bool)]
+                if modifiers.ctrl || modifiers.command || modifiers.mac_cmd {
+                    true // Prevent ctrl-P opening the print dialog. Users may want to use it for a command palette.
+                } else {
+                    false // let normal P:s through
+                }
             } else if egui_wants_keyboard {
                 matches!(
                     event.key().as_str(),
@@ -112,6 +123,7 @@ pub fn install_document_events(runner_container: &mut AppRunnerContainer) -> Res
 
             if prevent_default {
                 event.prevent_default();
+                // event.stop_propagation();
             }
         },
     )?;
@@ -126,6 +138,7 @@ pub fn install_document_events(runner_container: &mut AppRunnerContainer) -> Res
                 runner_lock.input.raw.events.push(egui::Event::Key {
                     key,
                     pressed: false,
+                    repeat: false,
                     modifiers,
                 });
             }
@@ -197,15 +210,21 @@ pub fn install_document_events(runner_container: &mut AppRunnerContainer) -> Res
 pub fn install_canvas_events(runner_container: &mut AppRunnerContainer) -> Result<(), JsValue> {
     let canvas = canvas_element(runner_container.runner.lock().canvas_id()).unwrap();
 
-    {
+    let prevent_default_events = [
         // By default, right-clicks open a context menu.
         // We don't want to do that (right clicks is handled by egui):
-        let event_name = "contextmenu";
+        "contextmenu",
+        // Allow users to use ctrl-p for e.g. a command palette
+        "afterprint",
+    ];
 
+    for event_name in prevent_default_events {
         let closure =
             move |event: web_sys::MouseEvent,
-                  mut _runner_lock: egui::mutex::MutexGuard<AppRunner>| {
+                  mut _runner_lock: egui::mutex::MutexGuard<'_, AppRunner>| {
                 event.prevent_default();
+                // event.stop_propagation();
+                // tracing::debug!("Preventing event {:?}", event_name);
             };
 
         runner_container.add_event_listener(&canvas, event_name, closure)?;
@@ -214,7 +233,7 @@ pub fn install_canvas_events(runner_container: &mut AppRunnerContainer) -> Resul
     runner_container.add_event_listener(
         &canvas,
         "mousedown",
-        |event: web_sys::MouseEvent, mut runner_lock: egui::mutex::MutexGuard<AppRunner>| {
+        |event: web_sys::MouseEvent, mut runner_lock: egui::mutex::MutexGuard<'_, AppRunner>| {
             if let Some(button) = button_from_mouse_event(&event) {
                 let pos = pos_from_mouse_event(runner_lock.canvas_id(), &event);
                 let modifiers = runner_lock.input.raw.modifiers;
@@ -309,7 +328,7 @@ pub fn install_canvas_events(runner_container: &mut AppRunnerContainer) -> Resul
                     modifiers,
                 });
 
-            push_touches(&mut *runner_lock, egui::TouchPhase::Start, &event);
+            push_touches(&mut runner_lock, egui::TouchPhase::Start, &event);
             runner_lock.needs_repaint.repaint_asap();
             event.stop_propagation();
             event.prevent_default();
@@ -331,7 +350,7 @@ pub fn install_canvas_events(runner_container: &mut AppRunnerContainer) -> Resul
                 .events
                 .push(egui::Event::PointerMoved(pos));
 
-            push_touches(&mut *runner_lock, egui::TouchPhase::Move, &event);
+            push_touches(&mut runner_lock, egui::TouchPhase::Move, &event);
             runner_lock.needs_repaint.repaint_asap();
             event.stop_propagation();
             event.prevent_default();
@@ -358,7 +377,7 @@ pub fn install_canvas_events(runner_container: &mut AppRunnerContainer) -> Resul
                 // Then remove hover effect:
                 runner_lock.input.raw.events.push(egui::Event::PointerGone);
 
-                push_touches(&mut *runner_lock, egui::TouchPhase::End, &event);
+                push_touches(&mut runner_lock, egui::TouchPhase::End, &event);
                 runner_lock.needs_repaint.repaint_asap();
                 event.stop_propagation();
                 event.prevent_default();
@@ -389,7 +408,7 @@ pub fn install_canvas_events(runner_container: &mut AppRunnerContainer) -> Resul
                 }
                 web_sys::WheelEvent::DOM_DELTA_LINE => {
                     #[allow(clippy::let_and_return)]
-                    let points_per_scroll_line = 8.0; // Note that this is intentionally different from what we use in egui_glium / winit.
+                    let points_per_scroll_line = 8.0; // Note that this is intentionally different from what we use in winit.
                     points_per_scroll_line
                 }
                 _ => 1.0, // DOM_DELTA_PIXEL

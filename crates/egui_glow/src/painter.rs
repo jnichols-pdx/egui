@@ -5,7 +5,7 @@ use std::{collections::HashMap, sync::Arc};
 
 use egui::{
     emath::Rect,
-    epaint::{Color32, Mesh, PaintCallbackInfo, Primitive, Vertex},
+    epaint::{Mesh, PaintCallbackInfo, Primitive, Vertex},
 };
 use glow::HasContext as _;
 use memoffset::offset_of;
@@ -20,17 +20,15 @@ pub use glow::Context;
 const VERT_SRC: &str = include_str!("shader/vertex.glsl");
 const FRAG_SRC: &str = include_str!("shader/fragment.glsl");
 
-pub type TextureFilter = egui::TextureFilter;
-
 trait TextureFilterExt {
     fn glow_code(&self) -> u32;
 }
 
-impl TextureFilterExt for TextureFilter {
+impl TextureFilterExt for egui::TextureFilter {
     fn glow_code(&self) -> u32 {
         match self {
-            TextureFilter::Linear => glow::LINEAR,
-            TextureFilter::Nearest => glow::NEAREST,
+            egui::TextureFilter::Linear => glow::LINEAR,
+            egui::TextureFilter::Nearest => glow::NEAREST,
         }
     }
 }
@@ -107,6 +105,23 @@ impl Painter {
     ) -> Result<Painter, String> {
         crate::profile_function!();
         crate::check_for_gl_error_even_in_release!(&gl, "before Painter::new");
+
+        // some useful debug info. all three of them are present in gl 1.1.
+        unsafe {
+            let version = gl.get_parameter_string(glow::VERSION);
+            let renderer = gl.get_parameter_string(glow::RENDERER);
+            let vendor = gl.get_parameter_string(glow::VENDOR);
+            tracing::debug!(
+                "\nopengl version: {version}\nopengl renderer: {renderer}\nopengl vendor: {vendor}"
+            );
+        }
+
+        #[cfg(not(target_arch = "wasm32"))]
+        if gl.version().major < 2 {
+            // this checks on desktop that we are not using opengl 1.1 microsoft sw rendering context.
+            // ShaderVersion::get fn will segfault due to SHADING_LANGUAGE_VERSION (added in gl2.0)
+            return Err("egui_glow requires opengl 2.0+. ".to_owned());
+        }
 
         let max_texture_side = unsafe { gl.get_parameter_i32(glow::MAX_TEXTURE_SIZE) } as usize;
         let shader_version = shader_version.unwrap_or_else(|| ShaderVersion::get(&gl));
@@ -469,7 +484,7 @@ impl Painter {
 
                 let data: &[u8] = bytemuck::cast_slice(image.pixels.as_ref());
 
-                self.upload_texture_srgb(delta.pos, image.size, delta.filter, data);
+                self.upload_texture_srgb(delta.pos, image.size, delta.options, data);
             }
             egui::ImageData::Font(image) => {
                 assert_eq!(
@@ -483,7 +498,7 @@ impl Painter {
                     .flat_map(|a| a.to_array())
                     .collect();
 
-                self.upload_texture_srgb(delta.pos, image.size, delta.filter, &data);
+                self.upload_texture_srgb(delta.pos, image.size, delta.options, &data);
             }
         };
     }
@@ -492,7 +507,7 @@ impl Painter {
         &mut self,
         pos: Option<[usize; 2]>,
         [w, h]: [usize; 2],
-        texture_filter: TextureFilter,
+        options: egui::TextureOptions,
         data: &[u8],
     ) {
         assert_eq!(data.len(), w * h * 4);
@@ -508,12 +523,12 @@ impl Painter {
             self.gl.tex_parameter_i32(
                 glow::TEXTURE_2D,
                 glow::TEXTURE_MAG_FILTER,
-                texture_filter.glow_code() as i32,
+                options.magnification.glow_code() as i32,
             );
             self.gl.tex_parameter_i32(
                 glow::TEXTURE_2D,
                 glow::TEXTURE_MIN_FILTER,
-                texture_filter.glow_code() as i32,
+                options.minification.glow_code() as i32,
             );
 
             self.gl.tex_parameter_i32(
@@ -607,6 +622,38 @@ impl Painter {
         }
     }
 
+    pub fn read_screen_rgba(&self, [w, h]: [u32; 2]) -> Vec<u8> {
+        let mut pixels = vec![0_u8; (w * h * 4) as usize];
+        unsafe {
+            self.gl.read_pixels(
+                0,
+                0,
+                w as _,
+                h as _,
+                glow::RGBA,
+                glow::UNSIGNED_BYTE,
+                glow::PixelPackData::Slice(&mut pixels),
+            );
+        }
+        pixels
+    }
+
+    pub fn read_screen_rgb(&self, [w, h]: [u32; 2]) -> Vec<u8> {
+        let mut pixels = vec![0_u8; (w * h * 3) as usize];
+        unsafe {
+            self.gl.read_pixels(
+                0,
+                0,
+                w as _,
+                h as _,
+                glow::RGB,
+                glow::UNSIGNED_BYTE,
+                glow::PixelPackData::Slice(&mut pixels),
+            );
+        }
+        pixels
+    }
+
     unsafe fn destroy_gl(&self) {
         self.gl.delete_program(self.program);
         for tex in self.textures.values() {
@@ -635,7 +682,7 @@ impl Painter {
     }
 }
 
-pub fn clear(gl: &glow::Context, screen_size_in_pixels: [u32; 2], clear_color: egui::Rgba) {
+pub fn clear(gl: &glow::Context, screen_size_in_pixels: [u32; 2], clear_color: [f32; 4]) {
     crate::profile_function!();
     unsafe {
         gl.disable(glow::SCISSOR_TEST);
@@ -646,24 +693,12 @@ pub fn clear(gl: &glow::Context, screen_size_in_pixels: [u32; 2], clear_color: e
             screen_size_in_pixels[0] as i32,
             screen_size_in_pixels[1] as i32,
         );
-
-        if true {
-            // verified to be correct on eframe native (on Mac).
-            gl.clear_color(
-                clear_color[0],
-                clear_color[1],
-                clear_color[2],
-                clear_color[3],
-            );
-        } else {
-            let clear_color: Color32 = clear_color.into();
-            gl.clear_color(
-                clear_color[0] as f32 / 255.0,
-                clear_color[1] as f32 / 255.0,
-                clear_color[2] as f32 / 255.0,
-                clear_color[3] as f32 / 255.0,
-            );
-        }
+        gl.clear_color(
+            clear_color[0],
+            clear_color[1],
+            clear_color[2],
+            clear_color[3],
+        );
         gl.clear(glow::COLOR_BUFFER_BIT);
     }
 }

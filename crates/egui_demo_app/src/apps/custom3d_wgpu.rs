@@ -1,8 +1,8 @@
-use std::sync::Arc;
+use std::{num::NonZeroU64, sync::Arc};
 
 use eframe::{
+    egui_wgpu::wgpu::util::DeviceExt,
     egui_wgpu::{self, wgpu},
-    wgpu::util::DeviceExt,
 };
 
 pub struct Custom3d {
@@ -18,32 +18,32 @@ impl Custom3d {
         let device = &wgpu_render_state.device;
 
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: None,
+            label: Some("custom3d"),
             source: wgpu::ShaderSource::Wgsl(include_str!("./custom3d_wgpu_shader.wgsl").into()),
         });
 
         let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: None,
+            label: Some("custom3d"),
             entries: &[wgpu::BindGroupLayoutEntry {
                 binding: 0,
                 visibility: wgpu::ShaderStages::VERTEX,
                 ty: wgpu::BindingType::Buffer {
                     ty: wgpu::BufferBindingType::Uniform,
                     has_dynamic_offset: false,
-                    min_binding_size: None,
+                    min_binding_size: NonZeroU64::new(16),
                 },
                 count: None,
             }],
         });
 
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: None,
+            label: Some("custom3d"),
             bind_group_layouts: &[&bind_group_layout],
             push_constant_ranges: &[],
         });
 
         let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: None,
+            label: Some("custom3d"),
             layout: Some(&pipeline_layout),
             vertex: wgpu::VertexState {
                 module: &shader,
@@ -62,15 +62,15 @@ impl Custom3d {
         });
 
         let uniform_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: None,
-            contents: bytemuck::cast_slice(&[0.0]),
-            usage: wgpu::BufferUsages::COPY_DST
-                | wgpu::BufferUsages::MAP_WRITE
-                | wgpu::BufferUsages::UNIFORM,
+            label: Some("custom3d"),
+            contents: bytemuck::cast_slice(&[0.0_f32; 4]), // 16 bytes aligned!
+            // Mapping at creation (as done by the create_buffer_init utility) doesn't require us to to add the MAP_WRITE usage
+            // (this *happens* to workaround this bug )
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::UNIFORM,
         });
 
         let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: None,
+            label: Some("custom3d"),
             layout: &bind_group_layout,
             entries: &[wgpu::BindGroupEntry {
                 binding: 0,
@@ -135,12 +135,18 @@ impl Custom3d {
         // Device and Queue, which can be used, for instance, to update buffers and uniforms before
         // rendering.
         //
+        // You can use the main `CommandEncoder` that is passed-in, return an arbitrary number
+        // of user-defined `CommandBuffer`s, or both.
+        // The main command buffer, as well as all user-defined ones, will be submitted together
+        // to the GPU in a single call.
+        //
         // The paint callback is called after prepare and is given access to the render pass, which
         // can be used to issue draw commands.
         let cb = egui_wgpu::CallbackFn::new()
-            .prepare(move |device, queue, paint_callback_resources| {
+            .prepare(move |device, queue, _encoder, paint_callback_resources| {
                 let resources: &TriangleRenderResources = paint_callback_resources.get().unwrap();
                 resources.prepare(device, queue, angle);
+                Vec::new()
             })
             .paint(move |_info, render_pass, paint_callback_resources| {
                 let resources: &TriangleRenderResources = paint_callback_resources.get().unwrap();
@@ -165,7 +171,11 @@ struct TriangleRenderResources {
 impl TriangleRenderResources {
     fn prepare(&self, _device: &wgpu::Device, queue: &wgpu::Queue, angle: f32) {
         // Update our uniform buffer with the angle from the UI
-        queue.write_buffer(&self.uniform_buffer, 0, bytemuck::cast_slice(&[angle]));
+        queue.write_buffer(
+            &self.uniform_buffer,
+            0,
+            bytemuck::cast_slice(&[angle, 0.0, 0.0, 0.0]),
+        );
     }
 
     fn paint<'rp>(&'rp self, render_pass: &mut wgpu::RenderPass<'rp>) {

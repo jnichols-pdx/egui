@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 // ----------------------------------------------------------------------------
 
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Deserialize, serde::Serialize))]
 pub struct UvRect {
     /// X/Y offset for nice rendering (unit: points).
@@ -31,18 +31,23 @@ impl UvRect {
     }
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct GlyphInfo {
+    /// Used for pair-kerning.
+    ///
+    /// Doesn't need to be unique.
+    /// Use `ab_glyph::GlyphId(0)` if you just want to have an id, and don't care.
     pub(crate) id: ab_glyph::GlyphId,
 
     /// Unit: points.
     pub advance_width: f32,
 
-    /// Texture coordinates. None for space.
+    /// Texture coordinates.
     pub uv_rect: UvRect,
 }
 
 impl Default for GlyphInfo {
+    /// Basically a zero-width space.
     fn default() -> Self {
         Self {
             id: ab_glyph::GlyphId(0),
@@ -105,6 +110,9 @@ impl FontImpl {
         }
     }
 
+    /// Code points that will always be replaced by the replacement character.
+    ///
+    /// See also [`invisible_char`].
     fn ignore_character(&self, chr: char) -> bool {
         if self.name == "emoji-icon-font" {
             // HACK: https://github.com/emilk/egui/issues/1284 https://github.com/jslegers/emoji-icon-font/issues/18
@@ -142,7 +150,7 @@ impl FontImpl {
         }
 
         if self.ignore_character(c) {
-            return None;
+            return None; // these will result in the replacement character when rendering
         }
 
         if c == '\t' {
@@ -156,19 +164,35 @@ impl FontImpl {
             }
         }
 
+        if c == '\u{2009}' {
+            // Thin space, often used as thousands deliminator: 1 234 567 890
+            // https://www.compart.com/en/unicode/U+2009
+            // https://en.wikipedia.org/wiki/Thin_space
+
+            if let Some(space) = self.glyph_info(' ') {
+                let em = self.height_in_points; // TODO(emilk): is this right?
+                let advance_width = f32::min(em / 6.0, space.advance_width * 0.5);
+                let glyph_info = GlyphInfo {
+                    advance_width,
+                    ..GlyphInfo::default()
+                };
+                self.glyph_info_cache.write().insert(c, glyph_info);
+                return Some(glyph_info);
+            }
+        }
+
+        if invisible_char(c) {
+            let glyph_info = GlyphInfo::default();
+            self.glyph_info_cache.write().insert(c, glyph_info);
+            return Some(glyph_info);
+        }
+
         // Add new character:
         use ab_glyph::Font as _;
         let glyph_id = self.ab_glyph_font.glyph_id(c);
 
         if glyph_id.0 == 0 {
-            if invisible_char(c) {
-                // hack
-                let glyph_info = GlyphInfo::default();
-                self.glyph_info_cache.write().insert(c, glyph_info);
-                Some(glyph_info)
-            } else {
-                None // unsupported character
-            }
+            None // unsupported character
         } else {
             let glyph_info = allocate_glyph(
                 &mut self.atlas.lock(),
@@ -265,6 +289,12 @@ impl Font {
         slf
     }
 
+    pub fn preload_characters(&mut self, s: &str) {
+        for c in s.chars() {
+            self.glyph_info(c);
+        }
+    }
+
     pub fn preload_common_characters(&mut self) {
         // Preload the printable ASCII characters [32, 126] (which excludes control codes):
         const FIRST_ASCII: usize = 32; // 32 == space
@@ -276,7 +306,7 @@ impl Font {
         self.glyph_info(crate::text::PASSWORD_REPLACEMENT_CHAR);
     }
 
-    /// All supported characters
+    /// All supported characters.
     pub fn characters(&mut self) -> &BTreeSet<char> {
         self.characters.get_or_insert_with(|| {
             let mut characters = BTreeSet::new();
@@ -308,6 +338,16 @@ impl Font {
     /// Width of this character in points.
     pub fn glyph_width(&mut self, c: char) -> f32 {
         self.glyph_info(c).1.advance_width
+    }
+
+    /// Can we display this glyph?
+    pub fn has_glyph(&mut self, c: char) -> bool {
+        self.glyph_info(c) != self.replacement_glyph // TODO(emilk): this is a false negative if the user asks about the replacement character itself 🤦‍♂️
+    }
+
+    /// Can we display all the glyphs in this text?
+    pub fn has_glyphs(&mut self, s: &str) -> bool {
+        s.chars().all(|c| self.has_glyph(c))
     }
 
     /// `\n` will (intentionally) show up as the replacement character.
@@ -343,12 +383,51 @@ impl Font {
     }
 }
 
+/// Code points that will always be invisible (zero width).
+///
+/// See also [`FontImpl::ignore_character`].
 #[inline]
 fn invisible_char(c: char) -> bool {
+    if c == '\r' {
+        // A character most vile and pernicious. Don't display it.
+        return true;
+    }
+
     // See https://github.com/emilk/egui/issues/336
 
     // From https://www.fileformat.info/info/unicode/category/Cf/list.htm
-    ('\u{200B}'..='\u{206F}').contains(&c) // TODO(emilk): heed bidi characters
+
+    // TODO(emilk): heed bidi characters
+
+    matches!(
+        c,
+        '\u{200B}' // ZERO WIDTH SPACE
+            | '\u{200C}' // ZERO WIDTH NON-JOINER
+            | '\u{200D}' // ZERO WIDTH JOINER
+            | '\u{200E}' // LEFT-TO-RIGHT MARK
+            | '\u{200F}' // RIGHT-TO-LEFT MARK
+            | '\u{202A}' // LEFT-TO-RIGHT EMBEDDING
+            | '\u{202B}' // RIGHT-TO-LEFT EMBEDDING
+            | '\u{202C}' // POP DIRECTIONAL FORMATTING
+            | '\u{202D}' // LEFT-TO-RIGHT OVERRIDE
+            | '\u{202E}' // RIGHT-TO-LEFT OVERRIDE
+            | '\u{2060}' // WORD JOINER
+            | '\u{2061}' // FUNCTION APPLICATION
+            | '\u{2062}' // INVISIBLE TIMES
+            | '\u{2063}' // INVISIBLE SEPARATOR
+            | '\u{2064}' // INVISIBLE PLUS
+            | '\u{2066}' // LEFT-TO-RIGHT ISOLATE
+            | '\u{2067}' // RIGHT-TO-LEFT ISOLATE
+            | '\u{2068}' // FIRST STRONG ISOLATE
+            | '\u{2069}' // POP DIRECTIONAL ISOLATE
+            | '\u{206A}' // INHIBIT SYMMETRIC SWAPPING
+            | '\u{206B}' // ACTIVATE SYMMETRIC SWAPPING
+            | '\u{206C}' // INHIBIT ARABIC FORM SHAPING
+            | '\u{206D}' // ACTIVATE ARABIC FORM SHAPING
+            | '\u{206E}' // NATIONAL DIGIT SHAPES
+            | '\u{206F}' // NOMINAL DIGIT SHAPES
+            | '\u{FEFF}' // ZERO WIDTH NO-BREAK SPACE
+    )
 }
 
 fn allocate_glyph(

@@ -1,4 +1,4 @@
-use crate::{textures::TextureFilter, Color32};
+use crate::{textures::TextureOptions, Color32};
 
 /// An image stored in RAM.
 ///
@@ -43,7 +43,7 @@ impl ImageData {
 // ----------------------------------------------------------------------------
 
 /// A 2D RGBA color image in RAM.
-#[derive(Clone, Default, PartialEq)]
+#[derive(Clone, Default, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Deserialize, serde::Serialize))]
 pub struct ColorImage {
     /// width, height.
@@ -101,6 +101,21 @@ impl ColorImage {
         Self { size, pixels }
     }
 
+    /// Create a [`ColorImage`] from flat RGB data.
+    ///
+    /// This is what you want to use after having loaded an image file (and if
+    /// you are ignoring the alpha channel - considering it to always be 0xff)
+    ///
+    /// Panics if `size[0] * size[1] * 3 != rgb.len()`.
+    pub fn from_rgb(size: [usize; 2], rgb: &[u8]) -> Self {
+        assert_eq!(size[0] * size[1] * 3, rgb.len());
+        let pixels = rgb
+            .chunks_exact(3)
+            .map(|p| Color32::from_rgb(p[0], p[1], p[2]))
+            .collect();
+        Self { size, pixels }
+    }
+
     /// An example color image, useful for tests.
     pub fn example() -> Self {
         let width = 128;
@@ -112,7 +127,7 @@ impl ColorImage {
                 let s = 1.0;
                 let v = 1.0;
                 let a = y as f32 / height as f32;
-                img[(x, y)] = crate::color::Hsva { h, s, v, a }.into();
+                img[(x, y)] = crate::Hsva { h, s, v, a }.into();
             }
         }
         img
@@ -276,7 +291,7 @@ pub struct ImageDelta {
     /// If [`Self::pos`] is `Some`, this describes a patch of the whole image starting at [`Self::pos`].
     pub image: ImageData,
 
-    pub filter: TextureFilter,
+    pub options: TextureOptions,
 
     /// If `None`, set the whole texture to [`Self::image`].
     ///
@@ -286,19 +301,19 @@ pub struct ImageDelta {
 
 impl ImageDelta {
     /// Update the whole texture.
-    pub fn full(image: impl Into<ImageData>, filter: TextureFilter) -> Self {
+    pub fn full(image: impl Into<ImageData>, options: TextureOptions) -> Self {
         Self {
             image: image.into(),
-            filter,
+            options,
             pos: None,
         }
     }
 
     /// Update a sub-region of an existing texture.
-    pub fn partial(pos: [usize; 2], image: impl Into<ImageData>, filter: TextureFilter) -> Self {
+    pub fn partial(pos: [usize; 2], image: impl Into<ImageData>, options: TextureOptions) -> Self {
         Self {
             image: image.into(),
-            filter,
+            options,
             pos: Some(pos),
         }
     }
