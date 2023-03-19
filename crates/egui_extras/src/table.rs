@@ -672,8 +672,8 @@ impl<'a> Table<'a> {
                                 // big enough to allow shrinking over time, small enough not to look ugly when
                                 // shrinking fails. This is a bit of a HACK around immediate mode.
                                 let max_shrinkage_per_frame = 8.0;
-                                new_width =
-                                    new_width.at_least(max_used_widths[i] - max_shrinkage_per_frame);
+                                new_width = new_width
+                                    .at_least(max_used_widths[i] - max_shrinkage_per_frame);
                             }
                             new_width = new_width.clamp(min_width, max_width);
 
@@ -1065,8 +1065,13 @@ impl<'a, 'b> TableRow<'a, 'b> {
 
             (used_rect, response)
         } else {
-            let (used_rect, response) = self.layout
-                .add_colored(clip, width, height, add_cell_contents, self.bg_color.unwrap());
+            let (used_rect, response) = self.layout.add_colored(
+                clip,
+                width,
+                height,
+                add_cell_contents,
+                self.bg_color.unwrap(),
+            );
 
             if let Some(max_w) = self.max_used_widths.get_mut(col_index) {
                 *max_w = max_w.max(used_rect.width());
