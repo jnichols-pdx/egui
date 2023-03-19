@@ -129,12 +129,19 @@ impl<'l> StripLayout<'l> {
         clip: bool,
         width: CellSize,
         height: CellSize,
-        add_contents: impl FnOnce(&mut Ui),
+        add_cell_contents: impl FnOnce(&mut Ui),
     ) -> (Rect, Response) {
-        let rect = self.cell_rect(&width, &height);
-        let used_rect = self.cell(clip, rect, add_contents);
-        self.set_pos(rect);
-        let response = self.ui.allocate_rect(rect.union(used_rect), Sense::click());
+        let max_rect = self.cell_rect(&width, &height);
+        let used_rect = self.cell(clip, max_rect, add_cell_contents);
+        self.set_pos(max_rect);
+
+        let allocation_rect = if clip {
+            max_rect
+        } else {
+            max_rect.union(used_rect)
+        };
+
+        let response = self.ui.allocate_rect(allocation_rect, Sense::click());
 
         (used_rect, response)
     }
@@ -144,20 +151,20 @@ impl<'l> StripLayout<'l> {
         clip: bool,
         width: CellSize,
         height: CellSize,
-        add_contents: impl FnOnce(&mut Ui),
+        add_cell_contents: impl FnOnce(&mut Ui),
         bg_color: egui::Color32,
     ) -> (Rect, Response) {
-        let rect = self.cell_rect(&width, &height);
+        let max_rect = self.cell_rect(&width, &height);
 
         // Make sure we don't have a gap in the stripe background:
-        let rect = rect.expand2(egui::vec2(
+        let colored_rect = max_rect.expand2(egui::vec2(
             0.5 * self.ui.spacing().item_spacing.x,
             0.30 * self.ui.spacing().item_spacing.y,
         ));
 
-        self.ui.painter().rect_filled(rect, 0.0, bg_color);
+        self.ui.painter().rect_filled(colored_rect, 0.0, bg_color);
 
-        let (used_rect, response) = self.add_clicky(clip, width, height, add_contents);
+        let (used_rect, response) = self.add_clicky(clip, width, height, add_cell_contents);
         (used_rect, response)
     }
 
